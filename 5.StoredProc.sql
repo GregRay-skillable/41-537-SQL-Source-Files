@@ -1,8 +1,9 @@
-SET ANSI_NULLS ON
+SET ANSI_NULLS ON;
 GO
-SET QUOTED_IDENTIFIER ON
+SET QUOTED_IDENTIFIER ON;
 GO
-CREATE   PROCEDURE [dbo].[SearchFAQ]
+
+CREATE OR ALTER PROCEDURE [dbo].[SearchFAQ]
 (
     @user_question NVARCHAR(1000)
 )
@@ -12,36 +13,44 @@ BEGIN
 
     DECLARE @response NVARCHAR(MAX);
     DECLARE @embed_json NVARCHAR(MAX);
-    DECLARE @vector_literal NVARCHAR(MAX);
     DECLARE @payload NVARCHAR(MAX);
+    DECLARE @status_code INT;
 
-    -- Build a simple JSON payload (escape double-quotes in the question)
     SET @payload = N'{"input":"' + REPLACE(@user_question, '"', '\"') + N'"}';
 
-    -- REST endpoint configuration: set these variables before deploying
-        DECLARE @url NVARCHAR(4000) = N'https://aoaidemogpt4-rhr.openai.azure.com/openai/deployments/text-embedding-3-small/embeddings?api-version=2024-12-01-preview';
-        -- Prefer a database-scoped credential containing the key as the secret
-        -- CREATE DATABASE SCOPED CREDENTIAL azureopenai_cred WITH IDENTITY = 'apikey', SECRET = '<your_key_here>';
-        -- DECLARE @credential_name NVARCHAR(256) = N'azureopenai_cred';
-        DECLARE @headers NVARCHAR(MAX) = N'{"api-key": "40b20c3e8bb04f318627ccc64e2e8f1"}';
+    DECLARE @url NVARCHAR(4000) = N'__AOAI_ENDPOINT__/openai/deployments/__AOAI_EMBEDDING_DEPLOYMENT__/embeddings?api-version=2024-12-01-preview';
+    DECLARE @headers NVARCHAR(MAX) = N'{"api-key":"__AOAI_API_KEY__"}';
 
-        -- Call the external REST endpoint using the credential for authentication
-        EXEC sp_invoke_external_rest_endpoint
-            @method = 'POST',
-            @url = @url,
-            @headers = @headers,
-            -- @credential = @credential_name,
-            @payload = @payload,
-            @response = @response OUTPUT;
+    EXEC sp_invoke_external_rest_endpoint
+        @method = 'POST',
+        @url = @url,
+        @headers = @headers,
+        @payload = @payload,
+        @response = @response OUTPUT;
+
+    SET @status_code = TRY_CAST(JSON_VALUE(@response, '$.response.status.http.code') AS INT);
+
+    IF @status_code <> 200
+    BEGIN
+        DECLARE @err_msg NVARCHAR(MAX) =
+            N'Failed to obtain embedding from external endpoint. HTTP '
+            + ISNULL(CAST(@status_code AS NVARCHAR(10)), N'NULL')
+            + N'. Response: '
+            + ISNULL(@response, N'NULL');
+
+        THROW 51000, @err_msg, 1;
+    END;
 
     SET @embed_json = JSON_QUERY(@response, '$.result.data[0].embedding');
 
     IF @embed_json IS NULL
     BEGIN
-        DECLARE @err_msg NVARCHAR(MAX) = N'Failed to obtain embedding from external endpoint. Response: ' + ISNULL(@response, N'NULL');
-        THROW 51000, @err_msg, 1;
-        RETURN;
-    END
+        DECLARE @err_msg2 NVARCHAR(MAX) =
+            N'Failed to obtain embedding from external endpoint. Response: '
+            + ISNULL(@response, N'NULL');
+
+        THROW 51001, @err_msg2, 1;
+    END;
 
     SELECT TOP 3
         c.faq_id,
